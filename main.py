@@ -29,6 +29,7 @@ logging.basicConfig(
 
 logger = logging.getLogger(__name__)
 
+# TODO: Let see if the todo github action finds me.
 class AIBot:
     def __init__(self, config_file='config.toml'):
         self.config_file = config_file
