@@ -1,14 +1,28 @@
 #!/bin/bash
-# Startup script for the AI bot
+# Startup script for the AI bot - with auto-restart on crash
+set -e
 
-echo "🤖 Starting AI Multi-Platform Bot"
-echo "=================================="
+BOT_DIR="$(cd "$(dirname "$0")" && pwd)"
+cd "$BOT_DIR"
 
-# Activate virtual environment
-source venv/bin/activate
+while true; do
+    echo "🤖 Starting AI Multi-Platform Bot"
+    echo "=================================="
+    echo "Model: $(grep '^model' config.toml | head -1 | cut -d'"' -f2)"
+    echo "Time: $(date)"
+    echo "=================================="
 
-# Start the bot
-python main.py
+    # Activate virtual environment
+    source venv/bin/activate
 
-# Deactivate when done
-deactivate
+    # Start the bot
+    python main.py || true
+
+    # Deactivate when done
+    deactivate
+
+    EXIT_CODE=$?
+    echo "Bot exited with code $EXIT_CODE at $(date)"
+    echo "Restarting in 5 seconds..."
+    sleep 5
+done
