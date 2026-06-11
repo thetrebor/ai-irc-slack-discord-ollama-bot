@@ -145,24 +145,18 @@ class IRCBot(irc.bot.SingleServerIRCBot):
         # Log the DM for context
         self.context.add_message(sender, sender, message)
 
-        # Check for continue command
-        if message.lower() in ['continue', 'cont', 'more']:
-            self.handle_continue(connection, sender, sender)  # DM context
-            return
-
         # Generate AI response with chat context
         chat_context = self.context.get_context_for_prompt(sender, sender)
         full_response = self.ollama_client.generate_full_response_with_context(
             message, sender, chat_context
         )
-        chunked_response = self.get_first_chunk(full_response, sender, sender)
 
         # Log bot response
         self.context.add_bot_message(sender, full_response)
         self.context.save()
 
-        # Send response back as private message
-        connection.privmsg(sender, chunked_response)
+        # Send response (auto-split if long)
+        self.send_response(connection, full_response, sender, sender)
         logger.info(f"Sent private response to {sender}")
 
     def on_pubmsg(self, connection, event):
@@ -174,21 +168,10 @@ class IRCBot(irc.bot.SingleServerIRCBot):
         # Log all channel messages for context
         self.context.add_message(sender, channel, message)
 
-        # Check for simple continue command (no mention)
-        if message.lower() in ['continue', 'cont', 'more']:
-            self.handle_continue(connection, sender, channel)
-            return
-
         # Check if bot is mentioned
         if self.is_mentioned(message):
             # Remove bot name from message
             clean_message = self.clean_message(message)
-
-            # Check if the cleaned message is a continue command
-            if clean_message.lower().strip() in ['continue', 'cont', 'more']:
-                logger.info(f"Continue command from {sender} in {channel}")
-                self.handle_continue(connection, sender, channel)
-                return
 
             logger.info(f"Mentioned in {channel} by {sender}: {clean_message}")
 
@@ -199,14 +182,13 @@ class IRCBot(irc.bot.SingleServerIRCBot):
             full_response = self.ollama_client.generate_full_response_with_context(
                 clean_message, sender, chat_context
             )
-            chunked_response = self.get_first_chunk(full_response, sender, channel)
 
             # Log bot response
             self.context.add_bot_message(channel, full_response)
             self.context.save()
 
-            # Send response to channel
-            connection.privmsg(channel, f"{sender}: {chunked_response}")
+            # Send response (auto-split if long)
+            self.send_response(connection, full_response, sender, channel)
             logger.info(f"Sent public response in {channel}")
 
     def is_mentioned(self, message):
@@ -248,94 +230,60 @@ class IRCBot(irc.bot.SingleServerIRCBot):
 
     MAX_IRC_MSG_LEN = 400  # Safe limit for PRIVMSG content (accounting for protocol overhead)
 
-    def get_first_chunk(self, full_text, user, context):
-        """Get the first chunk of text and store the rest for continuation"""
+    def send_response(self, connection, full_text, user, context):
+        """Send a response to IRC, auto-splitting if it exceeds the message limit.
+        Multiple chunks are sent sequentially with a brief delay."""
         prefix = f"{user}: " if context != user else ""
         prefix_len = len(prefix)
         max_len = self.MAX_IRC_MSG_LEN - prefix_len
-
-        key = f"{user}@{context}"
 
         # Clean the text for IRC
         clean_text = full_text.replace('\r\n', ' ').replace('\r', ' ').replace('\n', ' ')
         clean_text = ' '.join(clean_text.split())
 
-        # Reserve space for the continuation message
-        continuation_msg = " (say 'continue' for more)"
-        max_content_length = max_len - len(continuation_msg)
+        if len(clean_text) <= max_len:
+            # Fits in one message
+            msg = f"{prefix}{clean_text}".strip()
+            if context == user:
+                connection.privmsg(user, msg)
+            else:
+                connection.privmsg(context, msg)
+            return
 
-        if len(clean_text) <= max_content_length:
-            # Text fits in one message, no need to store
-            if key in self.stored_responses:
-                del self.stored_responses[key]
-            return f"{prefix}{clean_text}".strip()
+        # Split into chunks
+        chunks = []
+        remaining = clean_text
+        while remaining:
+            chunk_end = max_len - 3  # Reserve for "..."
+            if len(remaining) <= chunk_end:
+                chunks.append(remaining)
+                break
+            # Break at word boundary
+            space_pos = remaining.rfind(' ', 0, chunk_end)
+            if space_pos > chunk_end - 50:
+                chunk_end = space_pos
+            chunks.append(remaining[:chunk_end] + "...")
+            remaining = remaining[chunk_end:].strip()
 
-        # Find a good break point (prefer ending at word boundary)
-        chunk_end = max_content_length - 3  # Reserve space for "..."
+        # Send all chunks with a small delay between each
+        def _deliver_chunks():
+            for i, chunk in enumerate(chunks):
+                if context == user:
+                    connection.privmsg(user, chunk)
+                else:
+                    connection.privmsg(context, f"{prefix}{chunk}")
+                time.sleep(0.8)  # Brief pause to avoid IRC flood
+            logger.info(f"Sent {len(chunks)} chunks to {user} in {context}")
 
-        # Try to break at a word boundary
-        space_pos = clean_text.rfind(' ', 0, chunk_end)
-        if space_pos > chunk_end - 50:  # Only use word boundary if it's not too far back
-            chunk_end = space_pos
+        threading.Thread(target=_deliver_chunks, daemon=True).start()
 
-        # Store full text for continuation
-        self.stored_responses[key] = {
-            "full_text": clean_text,
-            "position": chunk_end
-        }
-
-        # Return first chunk with continuation indicator
-        first_chunk = clean_text[:chunk_end] + "..."
-        return f"{prefix}{first_chunk}{continuation_msg}".strip()
+    def get_first_chunk(self, full_text, user, context):
+        """Deprecated wrapper for send_response - kept for backward compatibility"""
+        return full_text[:397] + "..." if len(full_text) > 400 else full_text
 
     def handle_continue(self, connection, user, context):
-        """Handle continue requests"""
-        key = f"{user}@{context}"
-
-        if key not in self.stored_responses:
-            response = "No previous message to continue."
-        else:
-            stored = self.stored_responses[key]
-            full_text = stored["full_text"]
-            start_pos = stored["position"]
-
-            if start_pos >= len(full_text):
-                response = "End of message reached."
-                del self.stored_responses[key]
-            else:
-                # Account for sender prefix in channel context
-                prefix = f"{user}: " if context != user else ""
-                prefix_len = len(prefix)
-                max_len = self.MAX_IRC_MSG_LEN - prefix_len
-                continuation_msg = " (say 'continue' for more)"
-                max_content_length = max_len - len(continuation_msg)
-
-                remaining_text = full_text[start_pos:]
-
-                if len(remaining_text) <= max_content_length:
-                    # This is the last chunk
-                    response = f"{prefix}{remaining_text}"
-                    del self.stored_responses[key]
-                else:
-                    # More chunks remain - find good break point
-                    chunk_end = max_content_length - 3  # Reserve space for "..."
-
-                    # Try to break at word boundary
-                    space_pos = remaining_text.rfind(' ', 0, chunk_end)
-                    if space_pos > chunk_end - 50:  # Only use word boundary if it's not too far back
-                        chunk_end = space_pos
-
-                    chunk = remaining_text[:chunk_end] + "..."
-                    self.stored_responses[key]["position"] = start_pos + chunk_end
-                    response = f"{prefix}{chunk}{continuation_msg}"
-
-        # Send continuation response
-        if context == user:  # DM
-            connection.privmsg(user, response)
-        else:  # Channel
-            connection.privmsg(context, f"{user}: {response}")
-
-        logger.info(f"Sent continuation to {user} in {context}")
+        """Deprecated - all chunks are sent automatically now"""
+        pass
 
     def on_error(self, connection, event):
         """Handle IRC errors"""

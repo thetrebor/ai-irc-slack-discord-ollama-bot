@@ -82,4 +82,5 @@ docs/_build/
 
 # Backup files
 *.bak
-*.backup
+*.backupbot.pid
+message_history.json
