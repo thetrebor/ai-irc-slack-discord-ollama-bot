@@ -5,6 +5,16 @@ set -e
 BOT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$BOT_DIR"
 
+# Kill any existing gemmabot processes before starting
+pkill -f "[Pp]ython.*main\.py" 2>/dev/null || true
+sleep 3
+
+# Double-check nothing remains
+if pgrep -f "[Pp]ython.*main\.py" > /dev/null 2>&1; then
+    kill -9 $(pgrep -f "[Pp]ython.*main\.py") 2>/dev/null || true
+    sleep 2
+fi
+
 while true; do
     echo "🤖 Starting AI Multi-Platform Bot"
     echo "=================================="
@@ -21,8 +31,7 @@ while true; do
     # Deactivate when done
     deactivate
 
-    EXIT_CODE=$?
-    echo "Bot exited with code $EXIT_CODE at $(date)"
+    echo "Bot exited at $(date)"
     echo "Restarting in 5 seconds..."
     sleep 5
 done

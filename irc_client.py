@@ -9,7 +9,9 @@ import threading
 import logging
 import time
 import random
+import os
 from ollama_client import OllamaClient
+from context_manager import ContextManager
 
 
 class NoReconnect:
@@ -65,6 +67,13 @@ class IRCBot(irc.bot.SingleServerIRCBot):
         # Store full responses for continuation
         self.stored_responses = {}  # key: "user@channel", value: {"full_text": str, "position": int}
 
+        # Message history for AI context (last 24h, up to 4000 tokens)
+        self.context = ContextManager(
+            max_tokens=4000,
+            max_age_hours=24,
+            storage_path=os.path.join(os.path.dirname(__file__), 'message_history.json')
+        )
+
         # Reconnection settings
         self.reconnect_enabled = True
         self.reconnect_attempts = 0
@@ -79,21 +88,40 @@ class IRCBot(irc.bot.SingleServerIRCBot):
     _nick_retries = 0
 
     def on_nicknameinuse(self, connection, event):
-        """Handle nick in use: fallback with rate limit"""
+        """Handle nick in use: ghost via NickServ before falling back"""
         self._nick_retries += 1
         desired = self.nickname
         current = connection.get_nickname()
         logger.info(f"on_nicknameinuse: desired={desired}, current={current}, args={event.arguments}, retry=#{self._nick_retries}")
-        if self._nick_retries > 5:
+
+        nickserv_password = self.config['irc'].get('nickserv_password', '')
+
+        # First attempt: try GHOST via NickServ to reclaim the nick
+        if nickserv_password and self._nick_retries == 1:
+            logger.info(f"Attempting to GHOST old {desired} session via NickServ")
+            connection.privmsg('NickServ', f'IDENTIFY {nickserv_password}')
+            connection.privmsg('NickServ', f'GHOST {desired}')
+            # Give NickServ a moment to process, then try reclaiming
+            threading.Thread(target=self._reclaim_nick, args=(connection, desired), daemon=True).start()
+            return
+
+        # Fallback: use a random suffix
+        if self._nick_retries > 3:
             logger.error("Nick retry limit reached, using whatever nick we have")
             return
-        # Always generate a fresh fallback with random suffix
         fallback = f"{desired}{random.randint(10, 999)}"
         connection.nick(fallback)
-        # Identify so we can speak
-        nickserv_password = self.config['irc'].get('nickserv_password', '')
         if nickserv_password:
             connection.privmsg('NickServ', f'IDENTIFY {nickserv_password}')
+
+    def _reclaim_nick(self, connection, desired):
+        """Try to reclaim the desired nick after NickServ GHOST"""
+        time.sleep(3)
+        try:
+            logger.info(f"Attempting to reclaim nick {desired} after GHOST")
+            connection.nick(desired)
+        except Exception as e:
+            logger.warning(f"Failed to reclaim nick {desired}: {e}")
 
     def on_welcome(self, connection, event):
         """Called when bot successfully connects to IRC server"""
@@ -114,14 +142,24 @@ class IRCBot(irc.bot.SingleServerIRCBot):
 
         logger.info(f"Private message from {sender}: {message}")
 
+        # Log the DM for context
+        self.context.add_message(sender, sender, message)
+
         # Check for continue command
         if message.lower() in ['continue', 'cont', 'more']:
             self.handle_continue(connection, sender, sender)  # DM context
             return
 
-        # Generate AI response
-        full_response = self.ollama_client.generate_full_response(message)
+        # Generate AI response with chat context
+        chat_context = self.context.get_context_for_prompt(sender, sender)
+        full_response = self.ollama_client.generate_full_response_with_context(
+            message, sender, chat_context
+        )
         chunked_response = self.get_first_chunk(full_response, sender, sender)
+
+        # Log bot response
+        self.context.add_bot_message(sender, full_response)
+        self.context.save()
 
         # Send response back as private message
         connection.privmsg(sender, chunked_response)
@@ -132,6 +170,9 @@ class IRCBot(irc.bot.SingleServerIRCBot):
         sender = event.source.nick
         channel = event.target
         message = event.arguments[0].strip() if event.arguments else ""
+
+        # Log all channel messages for context
+        self.context.add_message(sender, channel, message)
 
         # Check for simple continue command (no mention)
         if message.lower() in ['continue', 'cont', 'more']:
@@ -151,9 +192,18 @@ class IRCBot(irc.bot.SingleServerIRCBot):
 
             logger.info(f"Mentioned in {channel} by {sender}: {clean_message}")
 
-            # Generate AI response
-            full_response = self.ollama_client.generate_full_response(clean_message)
+            # Build context from recent chat history
+            chat_context = self.context.get_context_for_prompt(sender, channel)
+
+            # Generate AI response with context
+            full_response = self.ollama_client.generate_full_response_with_context(
+                clean_message, sender, chat_context
+            )
             chunked_response = self.get_first_chunk(full_response, sender, channel)
+
+            # Log bot response
+            self.context.add_bot_message(channel, full_response)
+            self.context.save()
 
             # Send response to channel
             connection.privmsg(channel, f"{sender}: {chunked_response}")
