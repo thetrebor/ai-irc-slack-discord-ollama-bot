@@ -1,0 +1,10 @@
+.git
+__pycache__
+*.pyc
+venv
+.run.lock
+bot.pid
+bot.log
+bot-stdout.log
+bot-direct.log
+message_history.json

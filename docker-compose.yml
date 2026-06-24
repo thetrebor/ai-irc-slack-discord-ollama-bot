@@ -1,0 +1,19 @@
+services:
+  gemmabot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: gemmabot
+    restart: unless-stopped
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./message_history.json:/app/message_history.json
+      - ./bot.log:/app/bot.log
+    networks:
+      - irc_net
+
+networks:
+  irc_net:
+    external: true
+    name: calendar_default

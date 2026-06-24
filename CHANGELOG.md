@@ -1,5 +1,12 @@
 # Changelog
 
+## 2026-06-24 — Nick collision & process management fix
+- **Fixed nick collision cascade**: `on_nicknameinuse` now quits instead of spawning numbered clones (`gemmabot74`, `gemmabot751`, etc.). Sets `should_stop = True` and disconnects.
+- **Fixed `_nick_retries` class vs instance bug**: Was a class-level variable (shared across instances); moved to `__init__`.
+- **Mutex lock in `start_bot.sh`**: Uses `mkdir .run.lock` to prevent duplicate launcher processes.
+- **`botctl.sh` migrated to Docker Compose**: Uses `docker compose up -d --build` / `docker compose down` instead of fragile PID files and SIGSTOP wrappers. Ensures exactly one container.
+- **Switched from Chatterbox Qwen back to Ollama Gemma 4**: Bot needs its own model; summarizer stays on Chatterbox.
+
 All notable changes to the AI Multi-Platform Bot will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),

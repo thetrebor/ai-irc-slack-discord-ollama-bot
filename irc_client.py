@@ -82,13 +82,12 @@ class IRCBot(irc.bot.SingleServerIRCBot):
         self.max_reconnect_delay = 300  # Max delay in seconds (5 minutes)
         self.is_connected = False
         self.should_stop = False
+        self._nick_retries = 0
 
         logger.info(f"IRC Bot initialized for {self.server}:{self.port} as {self.nickname}")
 
-    _nick_retries = 0
-
     def on_nicknameinuse(self, connection, event):
-        """Handle nick in use: ghost via NickServ before falling back"""
+        """Handle nick collisions without creating extra bot identities."""
         self._nick_retries += 1
         desired = self.nickname
         current = connection.get_nickname()
@@ -96,23 +95,20 @@ class IRCBot(irc.bot.SingleServerIRCBot):
 
         nickserv_password = self.config['irc'].get('nickserv_password', '')
 
-        # First attempt: try GHOST via NickServ to reclaim the nick
         if nickserv_password and self._nick_retries == 1:
             logger.info(f"Attempting to GHOST old {desired} session via NickServ")
             connection.privmsg('NickServ', f'IDENTIFY {nickserv_password}')
             connection.privmsg('NickServ', f'GHOST {desired}')
-            # Give NickServ a moment to process, then try reclaiming
             threading.Thread(target=self._reclaim_nick, args=(connection, desired), daemon=True).start()
             return
 
-        # Fallback: use a random suffix
-        if self._nick_retries > 3:
-            logger.error("Nick retry limit reached, using whatever nick we have")
-            return
-        fallback = f"{desired}{random.randint(10, 999)}"
-        connection.nick(fallback)
-        if nickserv_password:
-            connection.privmsg('NickServ', f'IDENTIFY {nickserv_password}')
+        logger.error(f"Nick {desired} is still in use; refusing to start a suffixed duplicate bot")
+        self.should_stop = True
+        self.reconnect_enabled = False
+        try:
+            connection.quit(f"Nick {desired} already in use")
+        except Exception:
+            connection.disconnect()
 
     def _reclaim_nick(self, connection, desired):
         """Try to reclaim the desired nick after NickServ GHOST"""
